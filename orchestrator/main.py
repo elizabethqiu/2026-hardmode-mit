@@ -126,6 +126,7 @@ class EnokiOrchestrator:
             self.cloud_sync = CloudSync(c.SUPABASE_URL, c.SUPABASE_KEY, c.USER_ID, c.GROVE_ID)
             self.grove = GroveManager(c.USER_ID, c.GROVE_ID)
             self.cloud_sync.set_on_member_update(self.grove.update_members)
+            self.cloud_sync.set_on_nudge(self._on_grove_nudge)
         else:
             self.cloud_sync = None
             self.grove = None
@@ -134,6 +135,14 @@ class EnokiOrchestrator:
         """Callback when glasses send data."""
         with self._lock:
             self.glasses_data.update(data)
+
+    def _on_grove_nudge(self, message: str):
+        """Callback when a grove nudge arrives from the cloud. Speaks via TTS and glasses."""
+        log.info("Grove nudge: %s", message)
+        if self.tts:
+            self.tts.speak(message)
+        if self.glasses_receiver:
+            self.glasses_receiver.push_tts(message)
 
     def _read_xiao(self):
         if self.dev.no_xiao or not self._xiao_serial:

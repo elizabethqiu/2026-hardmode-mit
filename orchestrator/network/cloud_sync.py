@@ -48,7 +48,7 @@ class CloudSync:
                 log.warning("Supabase init failed: %s", e)
 
     def publish(self, state: str, focus_score: float, session_minutes: int,
-                today_focus_hours: float, in_sprint: bool, mushroom_mood: str):
+                today_focus_hours: float, in_sprint: bool, mushroom_mood: str):  # in_sprint kept for DB column compat
         """Upsert focus state to focus_states table."""
         self._ensure_client()
         if not self._client or not self._user_id or not self._grove_id:

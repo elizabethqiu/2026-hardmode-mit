@@ -1,5 +1,5 @@
 """
-grove.py — Grove state aggregation, sprint management, LED mapping.
+grove.py — Grove state aggregation, session management, LED mapping.
 
 Aggregates member states from cloud_sync. Maps members to LED positions.
 Provides get_grove_context() for Claude payloads.
@@ -18,7 +18,7 @@ STATE_TO_LED = {"FOCUSED": [20, 200, 60], "IDLE": [255, 140, 0], "DOZING": [255,
 class GroveManager:
     """
     Aggregates grove member states and provides context for Claude.
-    Manages sprint state (propose, accept, active, complete).
+    Manages session state (propose, accept, active, complete).
     """
 
     def __init__(self, user_id: str, grove_id: str):
@@ -26,8 +26,8 @@ class GroveManager:
         self._grove_id = grove_id
         self._members: list[dict[str, Any]] = []  # [{user_id, display_name, state, ...}]
         self._lock = __import__("threading").Lock()
-        self._sprint_active = False
-        self._sprint_remaining_min = 0
+        self._session_active = False
+        self._session_remaining_min = 0
 
     def update_members(self, records: list):
         """Update member state from cloud_sync callback."""
@@ -41,7 +41,7 @@ class GroveManager:
                         existing["state"] = state
                         existing["focus_score"] = r.get("focus_score", 0)
                         existing["today_focus_hours"] = r.get("today_focus_hours", 0)
-                        existing["in_sprint"] = r.get("in_sprint", False)
+                        existing["in_session"] = r.get("in_session", False)
                     else:
                         self._members.append({
                             "user_id": uid,
@@ -49,7 +49,7 @@ class GroveManager:
                             "state": state,
                             "focus_score": r.get("focus_score", 0),
                             "today_focus_hours": r.get("today_focus_hours", 0),
-                            "in_sprint": r.get("in_sprint", False),
+                            "in_session": r.get("in_session", False),
                         })
 
     def get_grove_context(self) -> dict:
@@ -60,8 +60,8 @@ class GroveManager:
             return {
                 "members_focused": focused,
                 "members_total": total,
-                "grove_sprint_active": self._sprint_active,
-                "grove_sprint_remaining_min": self._sprint_remaining_min,
+                "grove_session_active": self._session_active,
+                "grove_session_remaining_min": self._session_remaining_min,
                 "member_states": [m.get("state", "AWAY") for m in self._members],
             }
 
@@ -70,9 +70,9 @@ class GroveManager:
         with self._lock:
             return [STATE_TO_LED.get(m.get("state", "AWAY"), [0, 0, 0]) for m in self._members]
 
-    def set_sprint(self, active: bool, remaining_min: int = 0):
-        self._sprint_active = active
-        self._sprint_remaining_min = remaining_min
+    def set_session(self, active: bool, remaining_min: int = 0):
+        self._session_active = active
+        self._session_remaining_min = remaining_min
 
     def get_context(self) -> dict:
         """Alias for get_grove_context."""

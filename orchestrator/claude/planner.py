@@ -2,7 +2,7 @@
 claude/planner.py — Planning Claude for study session planning.
 
 Conversational. Takes user voice input + current task context.
-Returns structured study plans with sprint blocks.
+Returns structured study plans with session blocks.
 """
 
 import json
@@ -25,7 +25,7 @@ class PlannerClaude(ClaudeBase):
         """
         Generate a study plan from user input.
         context_payload: optional dict with current_state, session_focus_percentage, etc.
-        Returns {"plan_summary": str, "sprints": [...], "message": str}.
+        Returns {"plan_summary": str, "sessions": [...], "message": str}.
         """
         payload = context_payload or {}
         context = {
@@ -43,4 +43,4 @@ class PlannerClaude(ClaudeBase):
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            return {"plan_summary": "", "sprints": [], "message": raw}
+            return {"plan_summary": "", "sessions": [], "message": raw}

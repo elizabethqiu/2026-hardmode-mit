@@ -55,6 +55,10 @@ class EnokiOrchestrator:
         self.nudge_history: list[tuple[float, bool]] = []
         self.pending_nudge_check: Optional[tuple[float, str]] = None
 
+        # Session state
+        self._session_end: Optional[float] = None  # epoch time when focus session ends
+        self._session_duration_min: int = 0
+
     def _init_modules(self):
         """Initialize all modules. Called at start of run()."""
         from claude.personal import PersonalClaude
@@ -233,6 +237,45 @@ class EnokiOrchestrator:
         if len(self.nudge_history) > self.cfg.NUDGE_HISTORY_MAX:
             self.nudge_history.pop(0)
 
+    # ── Focus Session ──────────────────────────────────────────────────────────
+
+    def _session_active(self) -> bool:
+        return self._session_end is not None and time.time() < self._session_end
+
+    def _session_remaining_min(self) -> int:
+        if self._session_end is None:
+            return 0
+        return max(0, round((self._session_end - time.time()) / 60))
+
+    def _start_session(self, duration_min: int):
+        """Start a focus session timer, update grove state, pulse Arduino."""
+        self._session_end = time.time() + duration_min * 60
+        self._session_duration_min = duration_min
+        if self.grove:
+            self.grove.set_session(active=True, remaining_min=duration_min)
+        if self.actuator:
+            self.actuator.send_raw({"animate": "session_start", "led_color": [0, 180, 255], "led_brightness": 1.0})
+        log.info("Focus session started: %d minutes", duration_min)
+
+    def _tick_session(self):
+        """Check session timer each loop tick. Fire celebration when session ends."""
+        if self._session_end is None:
+            return
+        remaining = self._session_remaining_min()
+        if self.grove:
+            self.grove.set_session(active=self._session_active(), remaining_min=remaining)
+        if not self._session_active():
+            # Session just completed
+            log.info("Focus session complete!")
+            self._session_end = None
+            if self.actuator:
+                self.actuator.send_pose("celebration")
+            msg = f"Session complete. {self._session_duration_min} minutes done. Well done."
+            if self.tts:
+                self.tts.speak(msg)
+            if self.glasses_receiver:
+                self.glasses_receiver.push_tts(msg)
+
     def run(self):
         self.dev = self.dev or argparse.Namespace(no_xiao=False, no_arduino=False, no_vision=False, no_cloud=False)
 
@@ -296,11 +339,29 @@ class EnokiOrchestrator:
                         payload = self._build_claude_payload(current_state, state_duration)
                         plan = self.planner_claude.plan(text, payload)
                         if plan.get("message"):
-                            self.tts.speak(plan["message"])
+                            if self.tts:
+                                self.tts.speak(plan["message"])
                             if self.glasses_receiver:
                                 self.glasses_receiver.push_tts(plan["message"])
+                        # Start first session block if planner returned one
+                        sessions = plan.get("sessions", [])
+                        if sessions:
+                            first = min(sessions, key=lambda s: s.get("order", 0))
+                            duration = int(first.get("duration_minutes", 25))
+                            self._start_session(duration)
                     except Exception as e:
                         log.error("Planner Claude failed: %s", e)
+                elif any(kw in text.lower() for kw in ["session", "focus", "start"]):
+                    # Direct voice session: "start a 25 minute session"
+                    import re
+                    m = re.search(r"(\d+)\s*(?:minute|min)", text.lower())
+                    duration = max(1, min(60, int(m.group(1)))) if m else 25
+                    self._start_session(duration)
+                    msg = f"Starting a {duration}-minute focus session. Go."
+                    if self.tts:
+                        self.tts.speak(msg)
+                    if self.glasses_receiver:
+                        self.glasses_receiver.push_tts(msg)
                 else:
                     self.claude.add_user_message(text)
 
@@ -336,13 +397,15 @@ class EnokiOrchestrator:
                 except Exception as e:
                     log.error("Claude call failed: %s", e)
 
+            self._tick_session()
+
             if self.cloud_sync:
                 self.cloud_sync.publish(
                     state=current_state,
                     focus_score=vision.get("gaze_score", 1.0) * (1.0 if current_state == "FOCUSED" else 0.5),
                     session_minutes=round((time.time() - self.session_start) / 60),
                     today_focus_hours=round(self.session_focus_seconds / 3600, 1),
-                    in_sprint=False,
+                    in_sprint=self._session_active(),
                     mushroom_mood=self.enoki_pose,
                 )
 

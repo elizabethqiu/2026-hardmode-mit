@@ -21,16 +21,18 @@ pip install -r requirements.txt
 python run.py
 ```
 
-Dev mode (no hardware):
+Dev mode (no hardware) — run this from inside `orchestrator/`:
 
 ```bash
+cd orchestrator
 python run.py --no-xiao --no-arduino --no-vision --no-cloud
 ```
 
 ### 3. Train the pattern model (nightly cron)
 
 ```bash
-python orchestrator/train_pattern.py
+cd orchestrator
+python train_pattern.py
 ```
 
 ### 4. Mentra glasses MiniApp (optional)

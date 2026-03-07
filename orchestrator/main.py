@@ -326,10 +326,10 @@ class EnokiOrchestrator:
             if should_call:
                 payload = self._build_claude_payload(current_state, state_duration)
                 log.info("Calling Claude. State=%s duration=%ds", current_state, state_duration)
+                self.last_claude_call = now  # always update — prevents hammer-retry on failure
                 try:
                     response = self.claude.call(payload)
                     self._apply_claude_response(response)
-                    self.last_claude_call = now
                     if sm_action == "TRIGGER_CLAUDE":
                         self.pending_nudge_check = (now, current_state)
                     log.info("Claude response applied: mood=%s", response.get("enoki_mood"))

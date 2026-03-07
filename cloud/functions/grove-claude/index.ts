@@ -30,7 +30,7 @@ Deno.serve(async (req) => {
 
     const { data: members } = await supabase
       .from("focus_states")
-      .select("user_id, state, focus_score, session_minutes, today_focus_hours, in_sprint")
+      .select("user_id, state, focus_score, session_minutes, today_focus_hours, in_session")
       .eq("grove_id", grove_id);
 
     if (!members || members.length === 0) {

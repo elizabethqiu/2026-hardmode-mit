@@ -1,40 +1,42 @@
 """
-pattern_learner.py — SQLite logging + sklearn pattern detection
+pattern_learner.py — SQLite logging + sklearn pattern detection.
 
-Logs every state tick to SQLite. Provides:
-  - get_context(current_state) → (summary_string, slump_in_minutes)
-
-Uses a simple RandomForest trained nightly to predict slump probability.
-Falls back to rule-based hour-matching if no model is trained yet.
+Refactored from pi/pattern_learner.py. Config-based paths. import json at module level.
 """
 
-import os
-import time
-import sqlite3
-import pickle
+import json
 import logging
+import os
+import pickle
+import sqlite3
+import time
 from datetime import datetime
 
-log = logging.getLogger("enoki.learner")
+log = logging.getLogger("enoki.brain.learner")
 
-DB_PATH    = os.path.join(os.path.dirname(__file__), "..", "data", "enoki.db")
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "focus_pattern.pkl")
-
-# States considered non-focused
 SLUMP_STATES = {"IDLE", "DOZING", "AWAY"}
 
 
 class PatternLearner:
-    def __init__(self):
+    def __init__(
+        self,
+        db_path: str,
+        model_path: str,
+        log_interval: int = 5,
+        min_samples_train: int = 200,
+        slump_prob_threshold: float = 0.65,
+    ):
+        self._db_path = db_path
+        self._model_path = model_path
+        self._log_interval = log_interval
+        self._min_samples_train = min_samples_train
+        self._slump_prob_threshold = slump_prob_threshold
+        self._last_log_time = 0.0
         self._ensure_db()
         self._model = self._load_model()
-        self._last_log_time = 0.0
-        self._log_interval  = 5  # log every 5 seconds to avoid disk spam
-
-    # ── DB setup ──────────────────────────────────────────────────────────────
 
     def _ensure_db(self):
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
         with self._conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS state_log (
@@ -50,9 +52,7 @@ class PatternLearner:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON state_log(ts)")
 
     def _conn(self):
-        return sqlite3.connect(DB_PATH)
-
-    # ── Logging ───────────────────────────────────────────────────────────────
+        return sqlite3.connect(self._db_path)
 
     def log_state(self, state: str, sensors: dict):
         now = time.time()
@@ -61,44 +61,36 @@ class PatternLearner:
         self._last_log_time = now
 
         dt = datetime.now()
-        import json
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO state_log (ts, hour, minute, dow, state, sensors) VALUES (?,?,?,?,?,?)",
                 (int(now), dt.hour, dt.minute, dt.weekday(), state, json.dumps(sensors)),
             )
 
-    # ── Model ─────────────────────────────────────────────────────────────────
-
     def _load_model(self):
-        if os.path.exists(MODEL_PATH):
+        if os.path.exists(self._model_path):
             try:
-                with open(MODEL_PATH, "rb") as f:
+                with open(self._model_path, "rb") as f:
                     model = pickle.load(f)
-                log.info("Loaded pattern model from %s", MODEL_PATH)
+                log.info("Loaded pattern model from %s", self._model_path)
                 return model
             except Exception as e:
                 log.warning("Could not load model: %s", e)
         return None
 
     def train_and_save(self):
-        """
-        Train a RandomForest on historical data to predict slump probability
-        by hour-of-day and day-of-week. Call from a nightly cron.
-        """
+        """Train RandomForest on historical data. Call from nightly cron."""
         try:
-            from sklearn.ensemble import RandomForestClassifier
             import numpy as np
+            from sklearn.ensemble import RandomForestClassifier
         except ImportError:
             log.error("scikit-learn not installed — skipping training")
             return
 
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT hour, minute, dow, state FROM state_log"
-            ).fetchall()
+            rows = conn.execute("SELECT hour, minute, dow, state FROM state_log").fetchall()
 
-        if len(rows) < 200:
+        if len(rows) < self._min_samples_train:
             log.info("Not enough data to train (%d rows)", len(rows))
             return
 
@@ -108,50 +100,39 @@ class PatternLearner:
         clf = RandomForestClassifier(n_estimators=50, random_state=42)
         clf.fit(X, y)
 
-        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-        with open(MODEL_PATH, "wb") as f:
+        os.makedirs(os.path.dirname(self._model_path), exist_ok=True)
+        with open(self._model_path, "wb") as f:
             pickle.dump(clf, f)
 
         self._model = clf
         log.info("Pattern model trained on %d samples and saved.", len(rows))
 
-    # ── Context for Claude ────────────────────────────────────────────────────
-
     def get_context(self, current_state: str) -> tuple:
-        """
-        Returns (summary_string, predicted_slump_in_minutes).
-        Uses trained model if available, else rule-based fallback.
-        """
+        """Returns (summary_string, predicted_slump_in_minutes)."""
         now = datetime.now()
         slump_min = self._predict_slump_minutes(now)
-        summary   = self._build_summary(now, current_state)
+        summary = self._build_summary(now, current_state)
         return summary, slump_min
 
     def _predict_slump_minutes(self, now: datetime) -> int:
-        """
-        Scan forward in 5-min steps to find next predicted high-slump window.
-        Returns minutes until that window (0 if currently in one).
-        """
         if self._model is None:
             return self._rule_based_slump(now)
 
         import numpy as np
+
         for delta_min in range(0, 120, 5):
-            future_hour   = (now.hour   + (now.minute + delta_min) // 60) % 24
+            future_hour = (now.hour + (now.minute + delta_min) // 60) % 24
             future_minute = (now.minute + delta_min) % 60
             prob = self._model.predict_proba(
                 np.array([[future_hour, future_minute, now.weekday()]])
             )[0][1]
-            if prob > 0.65:
+            if prob > self._slump_prob_threshold:
                 return delta_min
 
-        return 60  # no slump predicted in next 2 hours — default 60
+        return 60
 
     def _rule_based_slump(self, now: datetime) -> int:
-        """Fallback: well-known productivity slump windows."""
-        h = now.hour
-        m = now.minute
-        # Post-lunch: 13:00-15:00, Late afternoon: 17:00-18:00
+        h, m = now.hour, now.minute
         if 13 <= h < 15:
             return 0
         if 17 <= h < 18:
@@ -161,7 +142,6 @@ class PatternLearner:
         return min(minutes_to_13, minutes_to_17)
 
     def _build_summary(self, now: datetime, current_state: str) -> str:
-        """Build a human-readable pattern summary for the Claude prompt."""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT state FROM state_log WHERE hour=? AND dow=?",

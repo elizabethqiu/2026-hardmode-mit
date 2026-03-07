@@ -1,4 +1,5 @@
 .env
+*.env.local
 __pycache__/
 *.py[cod]
 *.pkl
@@ -7,3 +8,8 @@ data/enoki.db
 .venv/
 venv/
 .DS_Store
+node_modules/
+miniapp/node_modules/
+dist/
+*.log
+.cursor/

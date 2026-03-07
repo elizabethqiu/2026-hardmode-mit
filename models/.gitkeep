@@ -1,0 +1,4 @@
+# Models
+
+- `focus_pattern.pkl` gets saved here after `train_pattern.py` runs. The trained sklearn RandomForest that predicts the user's personal slump windows by time-of-day.
+- `focus_classifier.tflite` also gets put here before converting it to the Arduino C header.

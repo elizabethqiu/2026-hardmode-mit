@@ -1,0 +1,8 @@
+anthropic>=0.30.0
+pyserial>=3.5
+mediapipe>=0.10.0
+opencv-python-headless>=4.9.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+adafruit-circuitpython-pca9685>=3.4.0
+adafruit-blinka>=8.0.0

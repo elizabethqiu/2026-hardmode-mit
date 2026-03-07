@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.py[cod]
+*.pkl
+data/enoki.db
+*.egg-info/
+.venv/
+venv/
+.DS_Store

@@ -14,6 +14,7 @@ class LedController {
   void setMood(int r, int g, int b, float brightness, const char* nudge_intensity);
   void setGroveLeds(const int colors[][3], int count);
   void animateCelebrate();
+  void setSprintPulse(bool active);
   void update();
 
  private:
@@ -21,6 +22,7 @@ class LedController {
   float brightness_;
   bool animating_;
   bool breathing_;
+  bool sprint_pulse_;
   unsigned long anim_start_;
   bool dirty_;
 };

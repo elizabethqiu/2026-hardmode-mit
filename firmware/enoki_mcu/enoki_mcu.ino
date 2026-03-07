@@ -54,6 +54,8 @@ void loop() {
           leds.animateCelebrate();
         }
 
+        leds.setSprintPulse(cmd.sprint_pulse);
+
         if (cmd.has_grove_leds) {
           leds.setGroveLeds(cmd.grove_leds, cmd.grove_count);
         }

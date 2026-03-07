@@ -29,3 +29,11 @@ export async function getPendingTTS(): Promise<TTSRequest | null> {
   if (!res.ok || res.status === 204) return null;
   return (await res.json()) as TTSRequest;
 }
+
+export async function getPendingAction(): Promise<{ action: string } | null> {
+  const url = `${getOrchestratorUrl()}/glasses/actions`;
+  const res = await fetch(url);
+  if (!res.ok || res.status === 204) return null;
+  const data = await res.json();
+  return data?.action ? data : null;
+}

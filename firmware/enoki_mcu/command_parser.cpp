@@ -12,6 +12,7 @@ Command CommandParser::parse(const String& json) {
   strlcpy(cmd.enoki_mood, "watchful", sizeof(cmd.enoki_mood));
   cmd.message[0] = '\0';
   cmd.animate[0] = '\0';
+  cmd.sprint_pulse = false;
   cmd.has_grove_leds = false;
   cmd.grove_count = 0;
 
@@ -41,6 +42,10 @@ Command CommandParser::parse(const String& json) {
 
   const char* anim = doc["animate"];
   if (anim) strlcpy(cmd.animate, anim, sizeof(cmd.animate));
+
+  if (doc.containsKey("sprint_pulse")) {
+    cmd.sprint_pulse = doc["sprint_pulse"] | false;
+  }
 
   JsonArray grove = doc["grove_leds"];
   if (grove.size() > 0) {

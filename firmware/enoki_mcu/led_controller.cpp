@@ -13,6 +13,7 @@ void LedController::begin() {
   brightness_ = 0.75f;
   animating_ = false;
   breathing_ = false;
+  sprint_pulse_ = false;
   dirty_ = false;
 }
 
@@ -51,6 +52,15 @@ void LedController::animateCelebrate() {
   anim_start_ = millis();
   animating_ = true;
   breathing_ = false;
+  sprint_pulse_ = false;
+}
+
+void LedController::setSprintPulse(bool active) {
+  sprint_pulse_ = active;
+  if (!active) {
+    FastLED.setBrightness((uint8_t)(brightness_ * 255));
+    dirty_ = true;
+  }
 }
 
 void LedController::update() {
@@ -81,6 +91,13 @@ void LedController::update() {
       FastLED.setBrightness(val);
       dirty_ = true;
     }
+  }
+  else if (sprint_pulse_) {
+    // Slow green pulse: 15 BPM, subtle brightness range
+    uint8_t val = beatsin8(15, (uint8_t)(brightness_ * 120), (uint8_t)(brightness_ * 255));
+    FastLED.setBrightness(val);
+    fill_solid(leds, NUM_LEDS, CRGB(20, 200, 60));
+    dirty_ = true;
   }
 
   if (dirty_) {

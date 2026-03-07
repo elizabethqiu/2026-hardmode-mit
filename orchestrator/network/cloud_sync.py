@@ -40,6 +40,7 @@ class CloudSync:
         self._grove_claude_url: Optional[str] = None
         self._last_grove_claude_call = 0.0
         self._grove_claude_interval = 60
+        self._on_grove_settings: Optional[Callable[[dict], None]] = None
 
     def set_on_member_update(self, callback: Callable[[list], None]):
         self._on_member_update = callback
@@ -49,6 +50,9 @@ class CloudSync:
 
     def set_on_sprint_change(self, callback: Callable[[dict], None]):
         self._on_sprint_change = callback
+
+    def set_on_grove_settings(self, callback: Callable[[dict], None]):
+        self._on_grove_settings = callback
 
     def set_grove_claude_url(self, url: str):
         self._grove_claude_url = url.strip() if url else None
@@ -63,6 +67,25 @@ class CloudSync:
                 log.warning("supabase-py not installed — cloud sync disabled")
             except Exception as e:
                 log.warning("Supabase init failed: %s", e)
+
+    def _fetch_grove_settings(self):
+        """Fetch grove-level settings like daily_goal_hours."""
+        self._ensure_client()
+        if not self._client or not self._grove_id:
+            return
+        try:
+            result = (
+                self._client.table("groves")
+                .select("daily_goal_hours")
+                .eq("id", self._grove_id)
+                .limit(1)
+                .execute()
+            )
+            if result.data and self._on_grove_settings:
+                self._on_grove_settings(result.data[0])
+                log.info("Loaded grove settings: %s", result.data[0])
+        except Exception as e:
+            log.debug("Grove settings fetch failed: %s", e)
 
     def _fetch_initial_members(self):
         """Fetch current grove member states with display names on startup."""
@@ -292,6 +315,7 @@ class CloudSync:
             return
         self._running = True
 
+        self._fetch_grove_settings()
         self._fetch_initial_members()
         self._subscribe_focus_states()
         self._subscribe_grove_nudges()

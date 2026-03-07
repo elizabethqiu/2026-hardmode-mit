@@ -33,6 +33,7 @@ class GroveManager:
         self._members: list[dict[str, Any]] = []
         self._display_names: dict[str, str] = {}  # user_id -> name cache
         self._lock = threading.Lock()
+        self._daily_goal_hours: float = 3.0
 
         # Sprint state
         self._sprint_active = False
@@ -207,6 +208,35 @@ class GroveManager:
 
     def get_member_led_states(self) -> list[list[int]]:
         return self.get_grove_leds()
+
+    def apply_grove_settings(self, settings: dict):
+        """Apply grove-level settings (e.g. daily_goal_hours)."""
+        with self._lock:
+            self._daily_goal_hours = settings.get("daily_goal_hours", self._daily_goal_hours)
+
+    def get_pact_progress(self) -> dict:
+        """
+        Return each member's progress toward the grove's daily focus goal.
+        Includes per-member achieved hours, goal, and fractional progress.
+        """
+        with self._lock:
+            goal = self._daily_goal_hours
+            members = []
+            for m in self._members:
+                achieved = m.get("today_focus_hours", 0.0)
+                progress = min(achieved / goal, 1.0) if goal > 0 else 0.0
+                members.append({
+                    "name": m.get("display_name", "?"),
+                    "user_id": m.get("user_id"),
+                    "achieved_hours": round(achieved, 1),
+                    "goal_hours": goal,
+                    "progress_pct": round(progress * 100),
+                    "is_self": m.get("user_id") == self._user_id,
+                })
+            return {
+                "daily_goal_hours": goal,
+                "members": members,
+            }
 
 
 GroveState = GroveManager

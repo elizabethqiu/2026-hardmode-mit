@@ -80,9 +80,41 @@ class PlanStore:
                     created_at REAL NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS nudge_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    worked INTEGER NOT NULL
+                )
+            """)
             conn.commit()
         except Exception as e:
             log.warning("Plan store table init failed: %s", e)
+
+    def save_nudge(self, ts: float, worked: bool):
+        """Persist a nudge outcome."""
+        try:
+            conn = self._get_conn()
+            conn.execute(
+                "INSERT INTO nudge_log (ts, worked) VALUES (?, ?)",
+                (ts, int(worked)),
+            )
+            conn.commit()
+        except Exception as e:
+            log.debug("Failed to save nudge: %s", e)
+
+    def load_recent_nudges(self, n: int = 50) -> list[tuple[float, bool]]:
+        """Load the most recent n nudge outcomes."""
+        try:
+            conn = self._get_conn()
+            rows = conn.execute(
+                "SELECT ts, worked FROM nudge_log ORDER BY ts DESC LIMIT ?",
+                (n,),
+            ).fetchall()
+            return [(row["ts"], bool(row["worked"])) for row in reversed(rows)]
+        except Exception as e:
+            log.debug("Failed to load nudges: %s", e)
+            return []
 
     def save_plan(self, plan: StudyPlan):
         """Save or replace today's plan."""

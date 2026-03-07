@@ -58,6 +58,8 @@ class EnokiOrchestrator:
         self.pending_nudge_check: Optional[tuple[float, str]] = None
         self._planner_turns = 0
         self._max_planner_turns = 3
+        self._last_sprint_pulse = False
+        self._last_state: Optional[str] = None
 
     def _init_modules(self):
         """Initialize all modules. Called at start of run()."""
@@ -81,6 +83,10 @@ class EnokiOrchestrator:
             model=c.CLAUDE_MODEL,
             max_tokens=c.CLAUDE_MAX_TOKENS,
         )
+        self.claude.set_tool_executor("start_sprint", self._tool_start_sprint)
+        self.claude.set_tool_executor("check_grove_status", self._tool_check_grove_status)
+        self.claude.set_tool_executor("take_photo", self._tool_take_photo)
+        self.claude.set_tool_executor("update_mushroom", self._tool_update_mushroom)
         self.vision_claude = VisionClaude(
             api_key=c.ANTHROPIC_API_KEY,
             model=c.CLAUDE_MODEL,
@@ -92,6 +98,7 @@ class EnokiOrchestrator:
             max_tokens=1024,
         )
         self.plan_store = PlanStore(db_path=c.DB_PATH)
+        self.nudge_history = self.plan_store.load_recent_nudges(self.cfg.NUDGE_HISTORY_MAX)
         self.sm = StateMachine(
             dozing_threshold=c.DOZING_NUDGE_THRESHOLD,
             idle_threshold=c.IDLE_NUDGE_THRESHOLD,
@@ -130,6 +137,7 @@ class EnokiOrchestrator:
             self.cloud_sync.set_on_member_update(self.grove.update_members)
             self.cloud_sync.set_on_grove_nudge(self.grove.handle_nudge)
             self.cloud_sync.set_on_sprint_change(self.grove.handle_sprint_change)
+            self.cloud_sync.set_on_grove_settings(self.grove.apply_grove_settings)
             grove_fn_url = os.environ.get("GROVE_CLAUDE_FUNCTION_URL", "").strip()
             if grove_fn_url:
                 self.cloud_sync.set_grove_claude_url(grove_fn_url)
@@ -215,6 +223,9 @@ class EnokiOrchestrator:
             }
         if self.grove:
             payload["grove"] = self.grove.get_context()
+            pact = self.grove.get_pact_progress()
+            if pact.get("members"):
+                payload["pact_progress"] = pact
         if self.plan_store:
             progress = self.plan_store.get_progress()
             if progress.get("has_plan"):
@@ -241,13 +252,53 @@ class EnokiOrchestrator:
         if self.grove and self.actuator:
             led_colors = self.grove.get_grove_leds()
             if led_colors:
+                pact = self.grove.get_pact_progress()
+                if pact.get("members"):
+                    for i, member in enumerate(pact["members"]):
+                        if i < len(led_colors):
+                            scale = max(0.15, member.get("progress_pct", 0) / 100.0)
+                            led_colors[i] = [int(c * scale) for c in led_colors[i]]
                 self.actuator.set_grove_leds(led_colors)
 
     def _record_nudge_outcome(self, state_before: str, state_after_60s: str):
         worked = state_before in ("IDLE", "DOZING") and state_after_60s == "FOCUSED"
-        self.nudge_history.append((time.time(), worked))
+        ts = time.time()
+        self.nudge_history.append((ts, worked))
         if len(self.nudge_history) > self.cfg.NUDGE_HISTORY_MAX:
             self.nudge_history.pop(0)
+        if self.plan_store:
+            self.plan_store.save_nudge(ts, worked)
+
+    # -- Tool executors for Personal Claude --
+
+    def _tool_start_sprint(self, input_data: dict) -> dict:
+        minutes = input_data.get("minutes", 25)
+        if self.cloud_sync:
+            self.cloud_sync.propose_sprint(minutes)
+        if self.plan_store:
+            nxt = self.plan_store.get_next_sprint()
+            if nxt:
+                self.plan_store.start_sprint(nxt.order)
+        return {"ok": True, "minutes": minutes, "proposed_to_grove": bool(self.cloud_sync)}
+
+    def _tool_check_grove_status(self, _input_data: dict) -> dict:
+        if self.grove:
+            return self.grove.get_grove_context()
+        return {"ok": False, "error": "No grove connected"}
+
+    def _tool_take_photo(self, _input_data: dict) -> dict:
+        if self.glasses_receiver:
+            self.glasses_receiver.request_photo()
+            return {"ok": True, "message": "Photo requested from glasses"}
+        return {"ok": False, "error": "Glasses not connected"}
+
+    def _tool_update_mushroom(self, input_data: dict) -> dict:
+        mood = input_data.get("mood", "watchful")
+        height = input_data.get("height", 0.7)
+        self.enoki_pose = mood
+        if self.actuator:
+            self.actuator.send_raw({"enoki_mood": mood, "height": height})
+        return {"ok": True, "mood": mood, "height": height}
 
     def _handle_planner_request(self, text: str, current_state: str, state_duration: float):
         """Initial planner invocation from a voice transcription."""
@@ -441,6 +492,22 @@ class EnokiOrchestrator:
                 if expired_sprint:
                     self.cloud_sync.complete_sprint(expired_sprint)
                     log.info("Sprint auto-completed: %s", expired_sprint)
+
+            # Sprint LED pulse — send when sprint state changes
+            in_sprint_now = (self.grove.is_sprint_active() if self.grove else False) or (
+                self.plan_store and self.plan_store.get_today_plan()
+                and self.plan_store.get_today_plan().active_sprint is not None
+            )
+            if in_sprint_now != self._last_sprint_pulse:
+                self._last_sprint_pulse = in_sprint_now
+                if self.actuator:
+                    self.actuator.send_raw({"sprint_pulse": in_sprint_now})
+
+            # State-change photo trigger — snap a photo when focus state transitions
+            if current_state != self._last_state:
+                if self._last_state is not None and self.glasses_receiver and self.glasses_data.get("wearing"):
+                    self.glasses_receiver.request_photo()
+                self._last_state = current_state
 
             # Handle grove nudges and celebrations
             if self.grove:

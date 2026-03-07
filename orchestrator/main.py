@@ -8,6 +8,7 @@ Mentra glasses (via MiniApp), and Supabase (grove sync).
 import argparse
 import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime
@@ -47,6 +48,7 @@ class EnokiOrchestrator:
         self.glasses_receiver: Optional[Any] = None
         self.cloud_sync: Optional[Any] = None
         self.grove: Optional[Any] = None
+        self.plan_store: Optional[Any] = None
 
         self.last_claude_call = 0.0
         self.enoki_pose = "full_droop"
@@ -54,10 +56,10 @@ class EnokiOrchestrator:
         self.session_focus_seconds = 0.0
         self.nudge_history: list[tuple[float, bool]] = []
         self.pending_nudge_check: Optional[tuple[float, str]] = None
-
-        # Session state
-        self._session_end: Optional[float] = None  # epoch time when focus session ends
-        self._session_duration_min: int = 0
+        self._planner_turns = 0
+        self._max_planner_turns = 3
+        self._last_sprint_pulse = False
+        self._last_state: Optional[str] = None
 
     def _init_modules(self):
         """Initialize all modules. Called at start of run()."""
@@ -72,6 +74,7 @@ class EnokiOrchestrator:
         from sensors.glasses_receiver import GlassesReceiver
         from network.cloud_sync import CloudSync
         from network.grove import GroveManager
+        from planning.plan_store import PlanStore
 
         c = self.cfg
 
@@ -80,6 +83,10 @@ class EnokiOrchestrator:
             model=c.CLAUDE_MODEL,
             max_tokens=c.CLAUDE_MAX_TOKENS,
         )
+        self.claude.set_tool_executor("start_sprint", self._tool_start_sprint)
+        self.claude.set_tool_executor("check_grove_status", self._tool_check_grove_status)
+        self.claude.set_tool_executor("take_photo", self._tool_take_photo)
+        self.claude.set_tool_executor("update_mushroom", self._tool_update_mushroom)
         self.vision_claude = VisionClaude(
             api_key=c.ANTHROPIC_API_KEY,
             model=c.CLAUDE_MODEL,
@@ -88,8 +95,10 @@ class EnokiOrchestrator:
         self.planner_claude = PlannerClaude(
             api_key=c.ANTHROPIC_API_KEY,
             model=c.CLAUDE_MODEL,
-            max_tokens=512,
+            max_tokens=1024,
         )
+        self.plan_store = PlanStore(db_path=c.DB_PATH)
+        self.nudge_history = self.plan_store.load_recent_nudges(self.cfg.NUDGE_HISTORY_MAX)
         self.sm = StateMachine(
             dozing_threshold=c.DOZING_NUDGE_THRESHOLD,
             idle_threshold=c.IDLE_NUDGE_THRESHOLD,
@@ -126,7 +135,12 @@ class EnokiOrchestrator:
             self.cloud_sync = CloudSync(c.SUPABASE_URL, c.SUPABASE_KEY, c.USER_ID, c.GROVE_ID)
             self.grove = GroveManager(c.USER_ID, c.GROVE_ID)
             self.cloud_sync.set_on_member_update(self.grove.update_members)
-            self.cloud_sync.set_on_nudge(self._on_grove_nudge)
+            self.cloud_sync.set_on_grove_nudge(self.grove.handle_nudge)
+            self.cloud_sync.set_on_sprint_change(self.grove.handle_sprint_change)
+            self.cloud_sync.set_on_grove_settings(self.grove.apply_grove_settings)
+            grove_fn_url = os.environ.get("GROVE_CLAUDE_FUNCTION_URL", "").strip()
+            if grove_fn_url:
+                self.cloud_sync.set_grove_claude_url(grove_fn_url)
         else:
             self.cloud_sync = None
             self.grove = None
@@ -135,14 +149,6 @@ class EnokiOrchestrator:
         """Callback when glasses send data."""
         with self._lock:
             self.glasses_data.update(data)
-
-    def _on_grove_nudge(self, message: str):
-        """Callback when a grove nudge arrives from the cloud. Speaks via TTS and glasses."""
-        log.info("Grove nudge: %s", message)
-        if self.tts:
-            self.tts.speak(message)
-        if self.glasses_receiver:
-            self.glasses_receiver.push_tts(message)
 
     def _read_xiao(self):
         if self.dev.no_xiao or not self._xiao_serial:
@@ -217,6 +223,14 @@ class EnokiOrchestrator:
             }
         if self.grove:
             payload["grove"] = self.grove.get_context()
+            pact = self.grove.get_pact_progress()
+            if pact.get("members"):
+                payload["pact_progress"] = pact
+        if self.plan_store:
+            progress = self.plan_store.get_progress()
+            if progress.get("has_plan"):
+                payload["study_plan"] = progress
+                payload["today_focus_hours"] = round(self.session_focus_seconds / 3600, 1)
         return payload
 
     def _nudge_effectiveness(self) -> str:
@@ -238,52 +252,129 @@ class EnokiOrchestrator:
         if self.grove and self.actuator:
             led_colors = self.grove.get_grove_leds()
             if led_colors:
+                pact = self.grove.get_pact_progress()
+                if pact.get("members"):
+                    for i, member in enumerate(pact["members"]):
+                        if i < len(led_colors):
+                            scale = max(0.15, member.get("progress_pct", 0) / 100.0)
+                            led_colors[i] = [int(c * scale) for c in led_colors[i]]
                 self.actuator.set_grove_leds(led_colors)
 
     def _record_nudge_outcome(self, state_before: str, state_after_60s: str):
         worked = state_before in ("IDLE", "DOZING") and state_after_60s == "FOCUSED"
-        self.nudge_history.append((time.time(), worked))
+        ts = time.time()
+        self.nudge_history.append((ts, worked))
         if len(self.nudge_history) > self.cfg.NUDGE_HISTORY_MAX:
             self.nudge_history.pop(0)
+        if self.plan_store:
+            self.plan_store.save_nudge(ts, worked)
 
-    # ── Focus Session ──────────────────────────────────────────────────────────
+    # -- Tool executors for Personal Claude --
 
-    def _session_active(self) -> bool:
-        return self._session_end is not None and time.time() < self._session_end
+    def _tool_start_sprint(self, input_data: dict) -> dict:
+        minutes = input_data.get("minutes", 25)
+        if self.cloud_sync:
+            self.cloud_sync.propose_sprint(minutes)
+        if self.plan_store:
+            nxt = self.plan_store.get_next_sprint()
+            if nxt:
+                self.plan_store.start_sprint(nxt.order)
+        return {"ok": True, "minutes": minutes, "proposed_to_grove": bool(self.cloud_sync)}
 
-    def _session_remaining_min(self) -> int:
-        if self._session_end is None:
-            return 0
-        return max(0, round((self._session_end - time.time()) / 60))
-
-    def _start_session(self, duration_min: int):
-        """Start a focus session timer, update grove state, pulse Arduino."""
-        self._session_end = time.time() + duration_min * 60
-        self._session_duration_min = duration_min
+    def _tool_check_grove_status(self, _input_data: dict) -> dict:
         if self.grove:
-            self.grove.set_session(active=True, remaining_min=duration_min)
+            return self.grove.get_grove_context()
+        return {"ok": False, "error": "No grove connected"}
+
+    def _tool_take_photo(self, _input_data: dict) -> dict:
+        if self.glasses_receiver:
+            self.glasses_receiver.request_photo()
+            return {"ok": True, "message": "Photo requested from glasses"}
+        return {"ok": False, "error": "Glasses not connected"}
+
+    def _tool_update_mushroom(self, input_data: dict) -> dict:
+        mood = input_data.get("mood", "watchful")
+        height = input_data.get("height", 0.7)
+        self.enoki_pose = mood
         if self.actuator:
-            self.actuator.send_raw({"animate": "session_start", "led_color": [0, 180, 255], "led_brightness": 1.0})
-        log.info("Focus session started: %d minutes", duration_min)
+            self.actuator.send_raw({"enoki_mood": mood, "height": height})
+        return {"ok": True, "mood": mood, "height": height}
 
-    def _tick_session(self):
-        """Check session timer each loop tick. Fire celebration when session ends."""
-        if self._session_end is None:
+    def _handle_planner_request(self, text: str, current_state: str, state_duration: float):
+        """Initial planner invocation from a voice transcription."""
+        try:
+            payload = self._build_claude_payload(current_state, state_duration)
+            existing = self.plan_store.get_plan_for_planner_context() if self.plan_store else None
+            result = self.planner_claude.plan(text, payload, existing_plan=existing)
+            self._planner_turns = 1
+            self._process_planner_result(result)
+        except Exception as e:
+            log.error("Planner Claude failed: %s", e)
+
+    def _handle_planner_followup(self, text: str):
+        """Handle a follow-up answer during multi-turn planning."""
+        if self._planner_turns >= self._max_planner_turns:
+            self.planner_claude.reset_conversation()
+            self._planner_turns = 0
+            self._speak("I'll work with what we have. Let me know if you want to plan again.")
             return
-        remaining = self._session_remaining_min()
-        if self.grove:
-            self.grove.set_session(active=self._session_active(), remaining_min=remaining)
-        if not self._session_active():
-            # Session just completed
-            log.info("Focus session complete!")
-            self._session_end = None
-            if self.actuator:
-                self.actuator.send_pose("celebration")
-            msg = f"Session complete. {self._session_duration_min} minutes done. Well done."
-            if self.tts:
-                self.tts.speak(msg)
-            if self.glasses_receiver:
-                self.glasses_receiver.push_tts(msg)
+        try:
+            result = self.planner_claude.follow_up(text)
+            self._planner_turns += 1
+            self._process_planner_result(result)
+        except Exception as e:
+            log.error("Planner follow-up failed: %s", e)
+            self.planner_claude.reset_conversation()
+            self._planner_turns = 0
+
+    def _process_planner_result(self, result: dict):
+        """Handle a planner response: ask follow-up, or save plan and optionally propose sprint."""
+        if result.get("needs_more_info"):
+            question = result.get("question", "Could you tell me more?")
+            self._speak(question)
+            return
+
+        # Plan is ready — save it
+        if result.get("sprints") and self.plan_store:
+            from planning.plan_store import StudyPlan, StudySprint
+            sprints = [
+                StudySprint(
+                    topic=s.get("topic", ""),
+                    duration_minutes=s.get("duration_minutes", 25),
+                    order=s.get("order", i + 1),
+                )
+                for i, s in enumerate(result["sprints"])
+            ]
+            plan = StudyPlan(
+                plan_summary=result.get("plan_summary", ""),
+                sprints=sprints,
+            )
+            self.plan_store.save_plan(plan)
+            log.info("Study plan saved: %d sprints", len(sprints))
+
+            # Auto-start the first sprint
+            if sprints:
+                self.plan_store.start_sprint(sprints[0].order)
+                self.claude.add_user_message(
+                    f"[Study plan created]: {plan.plan_summary}. "
+                    f"First sprint: '{sprints[0].topic}' ({sprints[0].duration_minutes} min)."
+                )
+
+            # Propose to grove if requested
+            if result.get("propose_to_grove") and self.cloud_sync and sprints:
+                self.cloud_sync.propose_sprint(sprints[0].duration_minutes)
+
+        if result.get("message"):
+            self._speak(result["message"])
+
+        self._planner_turns = 0
+
+    def _speak(self, text: str):
+        """Speak via TTS and push to glasses."""
+        if self.tts:
+            self.tts.speak(text)
+        if self.glasses_receiver:
+            self.glasses_receiver.push_tts(text)
 
     def run(self):
         self.dev = self.dev or argparse.Namespace(no_xiao=False, no_arduino=False, no_vision=False, no_cloud=False)
@@ -343,34 +434,11 @@ class EnokiOrchestrator:
                 text = glasses["transcription"]
                 with self._lock:
                     self.glasses_data.pop("transcription", None)
-                if any(kw in text.lower() for kw in ["plan", "schedule", "study", "help me"]):
-                    try:
-                        payload = self._build_claude_payload(current_state, state_duration)
-                        plan = self.planner_claude.plan(text, payload)
-                        if plan.get("message"):
-                            if self.tts:
-                                self.tts.speak(plan["message"])
-                            if self.glasses_receiver:
-                                self.glasses_receiver.push_tts(plan["message"])
-                        # Start first session block if planner returned one
-                        sessions = plan.get("sessions", [])
-                        if sessions:
-                            first = min(sessions, key=lambda s: s.get("order", 0))
-                            duration = int(first.get("duration_minutes", 25))
-                            self._start_session(duration)
-                    except Exception as e:
-                        log.error("Planner Claude failed: %s", e)
-                elif any(kw in text.lower() for kw in ["session", "focus", "start"]):
-                    # Direct voice session: "start a 25 minute session"
-                    import re
-                    m = re.search(r"(\d+)\s*(?:minute|min)", text.lower())
-                    duration = max(1, min(60, int(m.group(1)))) if m else 25
-                    self._start_session(duration)
-                    msg = f"Starting a {duration}-minute focus session. Go."
-                    if self.tts:
-                        self.tts.speak(msg)
-                    if self.glasses_receiver:
-                        self.glasses_receiver.push_tts(msg)
+
+                if self.planner_claude.awaiting_response:
+                    self._handle_planner_followup(text)
+                elif any(kw in text.lower() for kw in ["plan", "schedule", "study", "help me"]):
+                    self._handle_planner_request(text, current_state, state_duration)
                 else:
                     self.claude.add_user_message(text)
 
@@ -396,26 +464,92 @@ class EnokiOrchestrator:
             if should_call:
                 payload = self._build_claude_payload(current_state, state_duration)
                 log.info("Calling Claude. State=%s duration=%ds", current_state, state_duration)
-                self.last_claude_call = now  # always update — prevents hammer-retry on failure
                 try:
                     response = self.claude.call(payload)
                     self._apply_claude_response(response)
+                    self.last_claude_call = now
                     if sm_action == "TRIGGER_CLAUDE":
                         self.pending_nudge_check = (now, current_state)
                     log.info("Claude response applied: mood=%s", response.get("enoki_mood"))
                 except Exception as e:
                     log.error("Claude call failed: %s", e)
 
-            self._tick_session()
+            # Auto-advance plan sprints
+            if self.plan_store:
+                completed_order = self.plan_store.auto_complete_active()
+                if completed_order is not None:
+                    log.info("Plan sprint %d auto-completed", completed_order)
+                    nxt = self.plan_store.get_next_sprint()
+                    if nxt:
+                        self.plan_store.start_sprint(nxt.order)
+                        self.claude.add_user_message(
+                            f"[Study plan]: Sprint '{nxt.topic}' ({nxt.duration_minutes} min) starting now."
+                        )
+
+            # Sprint auto-complete check
+            if self.grove and self.cloud_sync:
+                expired_sprint = self.grove.check_sprint_expiry()
+                if expired_sprint:
+                    self.cloud_sync.complete_sprint(expired_sprint)
+                    log.info("Sprint auto-completed: %s", expired_sprint)
+
+            # Sprint LED pulse — send when sprint state changes
+            in_sprint_now = (self.grove.is_sprint_active() if self.grove else False) or (
+                self.plan_store and self.plan_store.get_today_plan()
+                and self.plan_store.get_today_plan().active_sprint is not None
+            )
+            if in_sprint_now != self._last_sprint_pulse:
+                self._last_sprint_pulse = in_sprint_now
+                if self.actuator:
+                    self.actuator.send_raw({"sprint_pulse": in_sprint_now})
+
+            # State-change photo trigger — snap a photo when focus state transitions
+            if current_state != self._last_state:
+                if self._last_state is not None and self.glasses_receiver and self.glasses_data.get("wearing"):
+                    self.glasses_receiver.request_photo()
+                self._last_state = current_state
+
+            # Handle grove nudges and celebrations
+            if self.grove:
+                nudge = self.grove.consume_pending_nudge()
+                if nudge and nudge.get("message"):
+                    msg = nudge["message"]
+                    log.info("Grove nudge (%s): %s", nudge.get("type"), msg)
+                    self.claude.add_user_message(f"[Grove nudge]: {msg}")
+                    if self.tts:
+                        self.tts.speak(msg)
+                    if self.glasses_receiver:
+                        self.glasses_receiver.push_tts(msg)
+
+                if self.grove.consume_pending_celebration():
+                    log.info("Grove celebration triggered")
+                    if self.actuator:
+                        self.actuator.send_raw({"animate": "celebrate"})
+                    # Also complete the active plan sprint if one is running
+                    if self.plan_store:
+                        plan = self.plan_store.get_today_plan()
+                        if plan and plan.active_sprint:
+                            self.plan_store.complete_sprint(plan.active_sprint.order)
+                            nxt = self.plan_store.get_next_sprint()
+                            if nxt:
+                                self.plan_store.start_sprint(nxt.order)
+                                self.claude.add_user_message(
+                                    f"[Study plan]: Sprint completed! Next: '{nxt.topic}' ({nxt.duration_minutes} min)."
+                                )
 
             if self.cloud_sync:
+                in_sprint = self.grove.is_sprint_active() if self.grove else False
                 self.cloud_sync.publish(
                     state=current_state,
                     focus_score=vision.get("gaze_score", 1.0) * (1.0 if current_state == "FOCUSED" else 0.5),
                     session_minutes=round((time.time() - self.session_start) / 60),
                     today_focus_hours=round(self.session_focus_seconds / 3600, 1),
-                    in_sprint=self._session_active(),
+                    in_sprint=in_sprint,
                     mushroom_mood=self.enoki_pose,
+                )
+                self.cloud_sync.publish_history(
+                    state=current_state,
+                    focus_score=vision.get("gaze_score", 1.0) * (1.0 if current_state == "FOCUSED" else 0.5),
                 )
 
             self._stop.wait(1)

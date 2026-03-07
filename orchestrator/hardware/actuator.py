@@ -19,14 +19,15 @@ class ActuatorClient:
     def send_command(self, claude_response: dict):
         """
         Extract actuator fields from a Claude response dict and send to Arduino.
-        Only sends the fields the Arduino needs — strips message/mood/etc.
+        Forwards height, LEDs, mood, and message for display.
         """
         cmd = {
-            "stem_height": self._clamp(claude_response.get("stem_height", 0.7)),
-            "cap_openness": self._clamp(claude_response.get("cap_openness", 0.5)),
+            "height": self._clamp(claude_response.get("height", 0.7)),
             "led_color": self._sanitize_color(claude_response.get("led_color", [200, 180, 120])),
             "led_brightness": self._clamp(claude_response.get("led_brightness", 0.6)),
             "nudge_intensity": claude_response.get("nudge_intensity", "none"),
+            "enoki_mood": claude_response.get("enoki_mood", "watchful"),
+            "message": claude_response.get("message", ""),
         }
         self._write(cmd)
 
@@ -47,11 +48,11 @@ class ActuatorClient:
         Useful for state machine to snap to known poses without Claude.
         """
         poses = {
-            "upright_open": {"stem_height": 1.0, "cap_openness": 1.0, "led_color": [20, 200, 60], "led_brightness": 1.0, "nudge_intensity": "none"},
-            "upright_neutral": {"stem_height": 0.8, "cap_openness": 0.65, "led_color": [200, 180, 120], "led_brightness": 0.75, "nudge_intensity": "none"},
-            "half_droop": {"stem_height": 0.5, "cap_openness": 0.4, "led_color": [255, 140, 0], "led_brightness": 0.6, "nudge_intensity": "none"},
-            "full_droop": {"stem_height": 0.1, "cap_openness": 0.1, "led_color": [180, 20, 10], "led_brightness": 0.3, "nudge_intensity": "none"},
-            "celebration": {"stem_height": 1.0, "cap_openness": 1.0, "led_color": [0, 200, 255], "led_brightness": 1.0, "nudge_intensity": "none", "animate": "celebrate"},
+            "upright_open": {"height": 1.0, "led_color": [20, 200, 60], "led_brightness": 1.0, "nudge_intensity": "none", "enoki_mood": "focused"},
+            "upright_neutral": {"height": 0.8, "led_color": [200, 180, 120], "led_brightness": 0.75, "nudge_intensity": "none", "enoki_mood": "watchful"},
+            "half_droop": {"height": 0.5, "led_color": [255, 140, 0], "led_brightness": 0.6, "nudge_intensity": "none", "enoki_mood": "concerned"},
+            "full_droop": {"height": 0.1, "led_color": [180, 20, 10], "led_brightness": 0.3, "nudge_intensity": "none", "enoki_mood": "urgent"},
+            "celebration": {"height": 1.0, "led_color": [0, 200, 255], "led_brightness": 1.0, "nudge_intensity": "none", "enoki_mood": "focused", "animate": "celebrate"},
         }
         if pose not in poses:
             log.warning("Unknown pose: %s", pose)

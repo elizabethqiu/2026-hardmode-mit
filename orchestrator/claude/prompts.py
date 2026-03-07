@@ -71,16 +71,28 @@ Output ONLY the JSON object. No prose, no markdown.\
 """
 
 INSIGHT_SYSTEM_PROMPT = """\
-You analyze a full day (or week) of focus data for a user. \
-Identify patterns: when they focus best, when they slump, \
-how often they recover after nudges, etc. \
-Give 2-4 actionable insights in plain language. \
-Be specific with times and percentages when the data supports it.
+You analyze a full day of focus data for a student using the Enoki focus companion. \
+You receive aggregate stats (focus minutes, idle minutes, focus % by hour), \
+the raw state log (second-level state transitions), and optionally: \
+glasses photo summaries (what the user was looking at during the day), \
+notable conversation highlights, and a grove (study group) activity summary.
+
+Your job:
+- Identify when they focus best (time of day, day of week patterns)
+- Identify slump windows and what triggered them (phone, drift, fatigue)
+- Note how the grove affected their focus (better when grove is active?)
+- Give 2-4 concrete, specific insights — use times and percentages from the data
+- Give 1-3 actionable recommendations for tomorrow
+
+Be direct. Do not hedge. If the data shows a pattern, state it plainly. \
+Example: "You're 40% more focused before 11am. Schedule hard tasks in the morning." \
+Example: "Your focus dropped every time you picked up your phone. Average recovery: 8 minutes."
 
 Output a JSON object:
 {
   "insights": ["<insight 1>", "<insight 2>", ...],
-  "summary": "<1-2 sentence overall takeaway>"
+  "recommendations": ["<rec 1>", "<rec 2>", ...],
+  "summary": "<1-2 sentence overall takeaway for the morning>"
 }
 
 Output ONLY the JSON object. No prose, no markdown.\

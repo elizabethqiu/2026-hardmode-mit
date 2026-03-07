@@ -14,7 +14,7 @@ from .prompts import PERSONAL_SYSTEM_PROMPT
 log = logging.getLogger("enoki.claude.personal")
 
 HARDWARE_KEYS = {
-    "enoki_mood", "stem_height", "cap_openness",
+    "enoki_mood", "height",
     "led_color", "led_brightness", "message",
     "speak_message", "nudge_intensity",
 }
@@ -74,8 +74,7 @@ class PersonalClaude(ClaudeBase):
         missing = HARDWARE_KEYS - set(r.keys())
         if missing:
             raise ValueError(f"Personal Claude response missing keys: {missing}")
-        assert 0.0 <= r["stem_height"] <= 1.0, "stem_height out of range"
-        assert 0.0 <= r["cap_openness"] <= 1.0, "cap_openness out of range"
+        assert 0.0 <= r["height"] <= 1.0, "height out of range"
         assert 0.0 <= r["led_brightness"] <= 1.0, "led_brightness out of range"
         assert len(r["led_color"]) == 3, "led_color must be [r,g,b]"
         assert r["enoki_mood"] in (

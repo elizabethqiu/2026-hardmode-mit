@@ -10,7 +10,7 @@ from typing import Any
 
 log = logging.getLogger("enoki.network.grove")
 
-# LED position per grove member (0-based index on NeoPixel ring)
+# LED position per grove member (0-based index on SK9822 strip)
 # focused=green, idle=amber, away=dark
 STATE_TO_LED = {"FOCUSED": [20, 200, 60], "IDLE": [255, 140, 0], "DOZING": [255, 100, 0], "AWAY": [0, 0, 0]}
 

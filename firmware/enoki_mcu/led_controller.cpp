@@ -1,54 +1,90 @@
 #include "led_controller.h"
-#include <Adafruit_NeoPixel.h>
+#include <FastLED.h>
 
-#define LED_PIN 6
-#define LED_COUNT 12
-
-Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+static CRGB leds[NUM_LEDS];
 
 void LedController::begin() {
-  strip.begin();
-  strip.show();
-  r_ = 200; g_ = 180; b_ = 120;
+  FastLED.addLeds<APA102, LED_DATA_PIN, LED_CLOCK_PIN, BGR>(leds, NUM_LEDS);
+  FastLED.setBrightness(190);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
+
+  base_r_ = 200; base_g_ = 180; base_b_ = 120;
   brightness_ = 0.75f;
   animating_ = false;
+  breathing_ = false;
+  dirty_ = false;
 }
 
 void LedController::setMood(int r, int g, int b, float brightness, const char* nudge_intensity) {
-  r_ = r; g_ = g; b_ = b;
+  base_r_ = r;
+  base_g_ = g;
+  base_b_ = b;
   brightness_ = constrain(brightness, 0.0f, 1.0f);
-  for (int i = 0; i < LED_COUNT; i++) {
-    strip.setPixelColor(i, strip.Color(
-      (int)(r_ * brightness_), (int)(g_ * brightness_), (int)(b_ * brightness_)));
+
+  FastLED.setBrightness((uint8_t)(brightness_ * 255));
+
+  fill_solid(leds, NUM_LEDS, CRGB(r, g, b));
+  dirty_ = true;
+
+  // "direct" nudge triggers a breathe effect
+  breathing_ = (nudge_intensity && strcmp(nudge_intensity, "direct") == 0);
+  if (breathing_) {
+    anim_start_ = millis();
+    animating_ = false;  // breathe overrides celebrate
   }
-  strip.show();
 }
 
-void LedController::setGroveLeds(const int* member_states, int count) {
-  for (int i = 0; i < min(count, LED_COUNT); i++) {
-    int s = member_states[i];
-    int r = (s == 1) ? 20 : (s == 0) ? 255 : 0;
-    int g = (s == 1) ? 200 : (s == 0) ? 140 : 0;
-    int b = (s == 1) ? 60 : (s == 0) ? 0 : 0;
-    strip.setPixelColor(i, strip.Color(r, g, b));
+void LedController::setGroveLeds(const int colors[][3], int count) {
+  int n = min(count, (int)NUM_LEDS);
+  for (int i = 0; i < n; i++) {
+    leds[i] = CRGB(colors[i][0], colors[i][1], colors[i][2]);
   }
-  strip.show();
+  // Fill remaining LEDs with base mood color
+  for (int i = n; i < NUM_LEDS; i++) {
+    leds[i] = CRGB(base_r_, base_g_, base_b_);
+  }
+  dirty_ = true;
 }
 
 void LedController::animateCelebrate() {
   anim_start_ = millis();
   animating_ = true;
+  breathing_ = false;
 }
 
 void LedController::update() {
-  if (!animating_) return;
-  unsigned long elapsed = millis() - anim_start_;
-  if (elapsed > 3000) { animating_ = false; return; }
-  float t = (elapsed % 500) / 500.0f;
-  float b = 0.5f + 0.5f * sin(t * 6.28f);
-  for (int i = 0; i < LED_COUNT; i++) {
-    strip.setPixelColor(i, strip.Color(
-      (int)(r_ * b), (int)(g_ * b), (int)(b_ * b)));
+  if (animating_) {
+    unsigned long elapsed = millis() - anim_start_;
+    if (elapsed > 3000) {
+      animating_ = false;
+      // Restore base color
+      fill_solid(leds, NUM_LEDS, CRGB(base_r_, base_g_, base_b_));
+      dirty_ = true;
+    } else {
+      // Rainbow chase
+      uint8_t hue_base = (elapsed / 10) & 0xFF;
+      for (int i = 0; i < NUM_LEDS; i++) {
+        leds[i] = CHSV(hue_base + i * (256 / NUM_LEDS), 255, 255);
+      }
+      dirty_ = true;
+    }
   }
-  strip.show();
+  else if (breathing_) {
+    unsigned long elapsed = millis() - anim_start_;
+    if (elapsed > 10000) {
+      breathing_ = false;
+      FastLED.setBrightness((uint8_t)(brightness_ * 255));
+      dirty_ = true;
+    } else {
+      uint8_t val = beatsin8(30, 40, 255);  // 30 BPM, range 40-255
+      FastLED.setBrightness(val);
+      dirty_ = true;
+    }
+  }
+
+  if (dirty_) {
+    FastLED.show();
+    dirty_ = false;
+  }
 }

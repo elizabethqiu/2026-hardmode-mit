@@ -13,3 +13,6 @@ miniapp/node_modules/
 dist/
 *.log
 .cursor/
+supabase/.temp/
+supabase/functions/
+.supabase/
